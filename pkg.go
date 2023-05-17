@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strconv"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/rdleal/intervalst/interval"
 )
 
@@ -17,13 +18,26 @@ type Result struct {
 
 type LookupTable struct {
 	tree *interval.SearchTree[Result, netip.Addr]
+	lru  *lru.Cache[netip.Addr, []Result]
 }
 
-func New(ip2asnTSV io.Reader) (*LookupTable, error) {
+type Option func(*LookupTable)
+
+func WithLRUCache(c *lru.Cache[netip.Addr, []Result]) Option {
+	return func(lt *LookupTable) {
+		lt.lru = c
+	}
+}
+
+func New(ip2asnTSV io.Reader, opts ...Option) (*LookupTable, error) {
 	// read csv values using csv.Reader
 	csvReader := csv.NewReader(ip2asnTSV)
 	csvReader.Comma = '\t'
 	ret := &LookupTable{}
+
+	for _, o := range opts {
+		o(ret)
+	}
 
 	cmpFn := func(a, b netip.Addr) int {
 		return a.Compare(b)
@@ -55,5 +69,14 @@ func New(ip2asnTSV io.Reader) (*LookupTable, error) {
 }
 
 func (lt LookupTable) Find(addr netip.Addr) ([]Result, bool) {
-	return lt.tree.AllIntersections(addr, addr)
+	if lt.lru != nil {
+		if v, ok := lt.lru.Get(addr); ok {
+			return v, ok
+		}
+	}
+	res, ok := lt.tree.AllIntersections(addr, addr)
+	if ok && lt.lru != nil {
+		lt.lru.Add(addr, res)
+	}
+	return res, ok
 }
